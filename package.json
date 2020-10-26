@@ -1,0 +1,22 @@
+{
+  "name": "media-hosting-miniprogram-sdk",
+  "version": "0.1.1",
+  "description": "Tenncent Cloud Smart Media Hosting SDK for WeChat MiniProgram.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -d",
+    "make-doc": "typedoc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TencentCloud/media-hosting-miniprogram-sdk.git"
+  },
+  "author": "fysntian",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/wechat-miniprogram": "^3.0.0",
+    "typedoc": "^0.19.2",
+    "typescript": "^4.0.3"
+  }
+}
