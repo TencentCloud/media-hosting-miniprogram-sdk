@@ -20,6 +20,18 @@ const URL_PREFIX = 'https://smh.tencentcs.com/api/v1';
  */
 class MH {
 
+    private static multiSpaceAccessTokenMapping: {
+        [key: string]: {
+            [spaceId: string]: {
+                /** 访问令牌 */
+                token: MH.AccessToken;
+                /** 访问令牌生成时间 */
+                timestamp: number;
+            };
+        };
+    } = {};
+    static getMultiSpaceAccessToken: MH.GetMultiSpaceAccessTokenFunc;
+
     private _spaceId?: string;
     private _userId?: string;
 
@@ -81,11 +93,36 @@ class MH {
     }
 
     /**
+     * 检查指定的访问令牌是否需要刷新
+     * @param token 访问令牌
+     * @param tokenTimestamp 访问令牌生成时间
+     * @param forceRenew 是否强制续期
+     */
+    private static checkNeedRefreshToken(token: MH.AccessToken, tokenTimestamp: number, forceRenew?: boolean) {
+        const sinceLastRefresh = Math.floor((Date.now() - tokenTimestamp) / 1000);
+        if ((!forceRenew && token.expiresIn - sinceLastRefresh > MIN_PERIOD_SECONDS)
+            || sinceLastRefresh < MIN_PERIOD_SECONDS) {
+            // 不需要强制刷新且有效期超过5分钟，或者需要强制刷新但距离上次刷新不足5分钟，直接返回
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 判断媒资托管后端服务返回的数据是否为后端错误
+     * @param data 媒资托管后端服务返回的数据
+     * @returns 是否为后端错误
+     */
+    private static isRemoteError(data: any): data is MH.RemoteErrorDetail {
+        return typeof data === 'object' && typeof data.code === 'string' && typeof data.message === 'string';
+    }
+
+    /**
      * 字符串化查询字符串
      * @param query 查询字符串键值对
      * @returns 查询字符串
      */
-    private static stringifyQueryString(query: MH.Query) {
+    static stringifyQueryString(query: MH.Query) {
         const queryList = [];
         for (const name in query) {
             let value = query[name];
@@ -108,21 +145,89 @@ class MH {
     }
 
     /**
-     * 判断媒资托管后端服务返回的数据是否为后端错误
-     * @param data 媒资托管后端服务返回的数据
-     * @returns 是否为后端错误
-     */
-    private static isRemoteError(data: any): data is MH.RemoteErrorDetail {
-        return typeof data === 'object' && typeof data.code === 'string' && typeof data.message === 'string';
-    }
-
-    /**
      * 编码路径
      * @param path 原始路径
      * @returns 编码后可直接拼接在 URL 中的路径
      */
-    private static encodePath(path: string) {
+    static encodePath(path: string) {
         return path.split('/').filter(name => name).map(name => encodeURIComponent(name)).join('/');
+    }
+
+    /**
+     * 确保可用于多个指定租户空间的访问令牌存在且在有效期内，否则将自动更新访问令牌。
+     * @param libraryId 媒体库 ID
+     * @param spaceIdList 租户空间 ID 列表
+     * @param callback 回调函数，返回是否成功及成功后符合要求有效期的可用于多个指定租户空间的访问令牌。
+     */
+    static ensureMultiSpaceToken(libraryId: string, spaceIdList: string[], callback?: MH.GetMultiSpaceAccessTokenCallback): void;
+    /**
+     * 确保可用于多个指定租户空间的访问令牌存在且在有效期内，否则将自动更新访问令牌。
+     * @param libraryId 媒体库 ID
+     * @param spaceIdList 租户空间 ID 列表
+     * @param userId 用户 ID
+     * @param callback 回调函数，返回是否成功及成功后符合要求有效期的可用于多个指定租户空间的访问令牌。
+     */
+    static ensureMultiSpaceToken(libraryId: string, spaceIdList: string[], userId: string, callback?: MH.GetMultiSpaceAccessTokenCallback): void;
+    static ensureMultiSpaceToken(libraryId: string, spaceIdList: string[], userId?: string | MH.GetMultiSpaceAccessTokenCallback, callback?: MH.GetMultiSpaceAccessTokenCallback) {
+        if (typeof userId === 'function') {
+            callback = userId;
+            userId = void 0;
+        }
+        userId = userId || '';
+        const key = [libraryId, userId].join('$');
+        if (!(key in MH.multiSpaceAccessTokenMapping)) {
+            MH.multiSpaceAccessTokenMapping[key] = {};
+        }
+        const mapping = MH.multiSpaceAccessTokenMapping[key];
+        const pendingSpaceIdList: string[] = [];
+        const result: MH.MultiSpaceAccessToken = {};
+        for (const spaceId of spaceIdList) {
+            const accessToken = mapping[spaceId];
+            if (accessToken && !MH.checkNeedRefreshToken(accessToken.token, accessToken.timestamp, true)) {
+                result[spaceId] = accessToken.token;
+            } else {
+                pendingSpaceIdList.push(spaceId);
+            }
+        }
+        if (!pendingSpaceIdList.length) {
+            return callback?.(null, result);
+        }
+        if (typeof MH.getMultiSpaceAccessToken !== 'function') {
+            return callback?.(new MH.ParamError('Invalid getMultiSpaceAccessToken'));
+        }
+        MH.getMultiSpaceAccessToken({ libraryId, spaceIdList: pendingSpaceIdList, userId }, (err, token) => {
+            if (MH.hasError(err, token)) {
+                return callback?.(new MH.GetAccessTokenError(err));
+            }
+            const timestamp = Date.now();
+            const spaceIdToken = { token, timestamp };
+            for (const spaceId of pendingSpaceIdList) {
+                mapping[spaceId] = spaceIdToken;
+                result[spaceId] = token;
+            }
+            callback?.(null, result);
+        });
+    }
+
+    /**
+     * 批量获取媒体库指定租户空间的封面图片 URL
+     * @param libraryId 媒体库 ID。
+     * @param spaceIdList 租户空间 ID 列表。
+     * @param size 封面图片大小(px)，将缩放裁剪为正方形图片，如不指定则为原始大小。
+     * @param callback 回调函数，返回是否成功及成功获取的相簿封面图片 URL。
+     * @return 与指定的租户空间 ID 列表顺序对应的租户空间封面图片 URL 列表。
+     */
+    static getSpaceCoverUrl(libraryId: string, spaceIdList: string[], size?: number, callback?: MH.GetUrlCallback) {
+        MH.ensureMultiSpaceToken(libraryId, spaceIdList, (err, token) => {
+            if (MH.hasError(err, token)) {
+                return callback?.(err);
+            }
+            const urls = spaceIdList.map(spaceId => `${URL_PREFIX}/album/${libraryId}/${spaceId}/cover?${MH.stringifyQueryString({
+                access_token: token[spaceId].accessToken,
+                size,
+            })}`);
+            callback?.(null, urls);
+        });
     }
 
     private updateToken(token?: MH.AccessToken | null, callback?: MH.GetAccessTokenCallback) {
@@ -159,7 +264,7 @@ class MH {
             userId: this.userId,
         }, (err, token) => {
             if (MH.hasError(err, token)) {
-                return callback?.(err);
+                return callback?.(new MH.GetAccessTokenError(err));
             }
             this.updateToken(token, callback);
         });
@@ -185,10 +290,7 @@ class MH {
             return this.refreshToken(callback);
         }
         const token = this.token!;
-        const sinceLastRefresh = Math.floor((Date.now() - this.tokenTimestamp) / 1000);
-        if ((!forceRenew && this.token.expiresIn - sinceLastRefresh > MIN_PERIOD_SECONDS)
-            || sinceLastRefresh < MIN_PERIOD_SECONDS) {
-            // 不需要强制刷新且有效期超过5分钟，或者需要强制刷新但距离上次刷新不足5分钟，直接返回
+        if (!MH.checkNeedRefreshToken(token, this.tokenTimestamp, forceRenew)) {
             return callback?.(null, token);
         }
         wx.request({
@@ -202,7 +304,7 @@ class MH {
                         return this.refreshToken(callback);
                     }
                     // 其他错误，抛出去
-                    return callback?.(new MH.RemoteError(data.code, data.message));
+                    return callback?.(new MH.RemoteError(result.statusCode, data.code, data.message));
                 }
                 const token = data as MH.AccessToken;
                 this.updateToken(token, callback);
@@ -239,7 +341,7 @@ class MH {
                             this.updateToken(null);
                             return this.ensureToken(innerCallback);
                         }
-                        return callback?.(new MH.RemoteError(data.code, data.message));
+                        return callback?.(new MH.RemoteError(result.statusCode, data.code, data.message));
                     }
                     this.updateToken();
                     callback?.(null, {
@@ -376,7 +478,8 @@ class MH {
         let retriedTimes = 0;
         let innerCallback: MH.ListDirectoryWithPaginationCallback = (err, result) => {
             if (MH.hasError(err, result)) {
-                if (retriedTimes >= 2) {
+                if (retriedTimes >= 2 || (err instanceof MH.GetAccessTokenError) ||
+                    (err instanceof MH.RemoteError) && (err.status === 403 || err.status === 404)) {
                     return callback?.(err);
                 }
                 retriedTimes++;
@@ -704,20 +807,40 @@ namespace MH {
     /** 通过微信接口发起请求时发生错误 */
     export class WxRequestError extends BaseError { }
 
+    /** 获取访问令牌时业务侧发生错误 */
+    export class GetAccessTokenError extends BaseError {
+
+        /** 获取访问令牌时业务侧返回的错误 */
+        public readonly nestedError: Error | null;
+
+        constructor(nestedError: Error | null) {
+            super(nestedError?.message || 'An error occured while getting access token');
+            this.nestedError = nestedError;
+            if (nestedError) {
+                this.stack = nestedError.stack;
+            }
+        }
+    }
+
     /** 媒资托管后端服务错误 */
     export class RemoteError extends BaseError {
+
+        /** HTTP 状态码 */
+        public readonly status: number;
 
         /** 错误码 */
         public readonly code: string;
 
         /** 
          * 实例化媒资托管后端服务错误
+         * @param status HTTP 状态码
          * @param code 错误码
          * @param message 错误信息
          * @private
          */
-        constructor(code: string, message: string) {
+        constructor(status: number, code: string, message: string) {
             super(message);
+            this.status = status;
             this.code = code;
         }
     }
@@ -765,8 +888,16 @@ namespace MH {
         expiresIn: number;
     }
 
-    /** 完成获取访问令牌函数的回调函数，在业务方完成令牌获取后调用该回调函数将令牌信息返回给媒体托管客户端。 */
+    /** 可用于多个指定租户空间的访问令牌信息 */
+    export interface MultiSpaceAccessToken {
+        [spaceId: string]: AccessToken;
+    }
+
+    /** 完成获取访问令牌函数的回调函数 */
     export type GetAccessTokenCallback = GeneralCallback<AccessToken>;
+
+    /** 完成获取可用于多个指定租户空间的访问令牌函数的回调函数 */
+    export type GetMultiSpaceAccessTokenCallback = GeneralCallback<MultiSpaceAccessToken>;
 
     /** 获取访问令牌函数的参数 */
     export interface GetAccessTokenFuncParams {
@@ -778,6 +909,16 @@ namespace MH {
         userId: string;
     }
 
+    /** 获取可用于多个指定租户空间的访问令牌函数的参数 */
+    export interface GetMultiSpaceAccessTokenFuncParams {
+        /** 媒体库 ID */
+        libraryId: string;
+        /** 租户空间 ID 列表 */
+        spaceIdList: string[];
+        /** 用户 ID */
+        userId: string;
+    }
+
     /** 获取访问令牌函数 */
     export interface GetAccessTokenFunc {
         /**
@@ -785,6 +926,15 @@ namespace MH {
          * @param callback 回调函数，在业务方完成令牌获取后调用该回调函数将令牌信息返回给媒体托管客户端
          */
         (params: GetAccessTokenFuncParams, callback: GetAccessTokenCallback): void;
+    }
+
+    /** 获取可用于多个指定租户空间的访问令牌函数 */
+    export interface GetMultiSpaceAccessTokenFunc {
+        /**
+         * @param params 获取可用于多个指定租户空间的访问令牌函数的参数
+         * @param callback 回调函数，在业务方完成令牌获取后调用该回调函数将令牌信息返回给媒体托管客户端
+         */
+        (params: GetMultiSpaceAccessTokenFuncParams, callback: GetAccessTokenCallback): void;
     }
 
     /** 实例化媒资托管客户端的参数 */
@@ -802,7 +952,6 @@ namespace MH {
 
     /** 查询字符串结构 */
     export interface Query {
-        /** 键值对 */
         [name: string]: undefined | string | number | boolean | (undefined | string | number | boolean)[];
     }
 

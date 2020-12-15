@@ -1,6 +1,6 @@
 {
   "name": "media-hosting-miniprogram-sdk",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Tenncent Cloud Smart Media Hosting SDK for WeChat MiniProgram.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

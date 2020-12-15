@@ -1,4 +1,6 @@
 declare class MH {
+    private static multiSpaceAccessTokenMapping;
+    static getMultiSpaceAccessToken: MH.GetMultiSpaceAccessTokenFunc;
     private _spaceId?;
     private _userId?;
     readonly libraryId: string;
@@ -12,9 +14,13 @@ declare class MH {
     private tokenTimer;
     constructor(params: MH.ConstructorParams);
     private static hasError;
-    private static stringifyQueryString;
+    private static checkNeedRefreshToken;
     private static isRemoteError;
-    private static encodePath;
+    static stringifyQueryString(query: MH.Query): string;
+    static encodePath(path: string): string;
+    static ensureMultiSpaceToken(libraryId: string, spaceIdList: string[], callback?: MH.GetMultiSpaceAccessTokenCallback): void;
+    static ensureMultiSpaceToken(libraryId: string, spaceIdList: string[], userId: string, callback?: MH.GetMultiSpaceAccessTokenCallback): void;
+    static getSpaceCoverUrl(libraryId: string, spaceIdList: string[], size?: number, callback?: MH.GetUrlCallback): void;
     private updateToken;
     refreshToken(callback?: MH.GetAccessTokenCallback): void;
     ensureToken(callback?: MH.GetAccessTokenCallback): void;
@@ -55,9 +61,14 @@ declare namespace MH {
     }
     class WxRequestError extends BaseError {
     }
+    class GetAccessTokenError extends BaseError {
+        readonly nestedError: Error | null;
+        constructor(nestedError: Error | null);
+    }
     class RemoteError extends BaseError {
+        readonly status: number;
         readonly code: string;
-        constructor(code: string, message: string);
+        constructor(status: number, code: string, message: string);
     }
     class CosError extends BaseError {
         readonly code: string;
@@ -71,14 +82,26 @@ declare namespace MH {
         accessToken: string;
         expiresIn: number;
     }
+    interface MultiSpaceAccessToken {
+        [spaceId: string]: AccessToken;
+    }
     type GetAccessTokenCallback = GeneralCallback<AccessToken>;
+    type GetMultiSpaceAccessTokenCallback = GeneralCallback<MultiSpaceAccessToken>;
     interface GetAccessTokenFuncParams {
         libraryId: string;
         spaceId: string;
         userId: string;
     }
+    interface GetMultiSpaceAccessTokenFuncParams {
+        libraryId: string;
+        spaceIdList: string[];
+        userId: string;
+    }
     interface GetAccessTokenFunc {
         (params: GetAccessTokenFuncParams, callback: GetAccessTokenCallback): void;
+    }
+    interface GetMultiSpaceAccessTokenFunc {
+        (params: GetMultiSpaceAccessTokenFuncParams, callback: GetAccessTokenCallback): void;
     }
     interface ConstructorParams {
         libraryId: string;
